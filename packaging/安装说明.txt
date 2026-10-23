@@ -1,0 +1,70 @@
+﻿再再启程 One Way Tickets 自动维修模组整合包
+OWT Auto Repair 0.3.0 + BepInEx 5.4.23.5
+
+适用版本
+Windows 64 位，Steam 版《再再启程 One Way Tickets》。
+
+包内包含
+- BepInEx 5.4.23.5（x64）
+- BepInEx/plugins/OWT.AutoRepair.dll
+- BepInEx/config/owt.autorepair.cfg（日志默认关闭）
+- 本安装说明
+- 第三方许可证
+
+模组功能
+进入旅途后，模组会自动处理装置和角色问题：
+- 修好已经损毁的装置
+- 灭火
+- 擦掉装置上的水滴和酸液
+- 剪断缠绕装置的藤蔓
+- 处理装置故障
+- 唤醒昏迷角色（默认开启）
+- 可选：回复未损毁装置的 HP（默认关闭）
+
+有对应工具时，模组会使用游戏里的真实工具完成动作；没有工具时，按当前模式回退到后台处理。工具动作、点击间隔和回退模式都可以在配置里调整。
+
+安装
+1. 退出游戏，Steam 可以保持运行。
+2. 解压压缩包，把里面的所有文件放到游戏根目录，也就是 再再启程.exe 所在的文件夹。
+   Steam 默认路径示例：
+   你的 Steam 库\steamapps\common\再再启程 One Way Tickets
+3. 系统询问是否合并或覆盖时，选择“是”。
+4. 从 Steam 正常启动游戏。
+
+日志验证
+打开游戏目录下的 BepInEx\LogOutput.log，能看到下面几行就说明加载成功：
+[Info   :OWT Auto Repair] OWT Auto Repair v0.3.0 loaded.
+[Info   :OWT Auto Repair] Patched World.WorldSceneRoot.on_init.
+[Info   :OWT Auto Repair] Patched BaseInputController.GetScreenMousePosition.
+[Info   :OWT Auto Repair] Auto repair tick registered.
+
+配置
+配置文件：BepInEx\config\owt.autorepair.cfg
+常用开关：
+- Enabled：总开关，默认开启。
+- Mode：Hybrid 有工具时用真实工具，没有工具时后台处理；ToolsOnly 只用真实工具；Background 全部后台处理。
+- RepairBrokenDevices：是否自动修好坏掉的装置。
+- RepairDamagedDevices：是否自动回复未损毁装置的 HP，默认关闭。
+- WakeComatoseCharacters：是否自动唤醒昏迷角色，默认开启。
+- LogRepairs：是否在日志里记录每次动作，默认关闭。
+修改配置后重启游戏生效。
+
+已经装过 BepInEx 的情况
+只需要覆盖 BepInEx\plugins\OWT.AutoRepair.dll 和 BepInEx\config\owt.autorepair.cfg。覆盖配置前先备份自己改过的 cfg。
+
+卸载
+删除 BepInEx\plugins\OWT.AutoRepair.dll。
+如果不再使用任何模组，再删除游戏根目录的 winhttp.dll、doorstop_config.ini、.doorstop_version、changelog.txt 和 BepInEx 文件夹。
+
+常见问题
+- 杀毒软件报警
+  winhttp.dll 是 BepInEx 的注入组件，可能是误报。不放心的话不要安装。
+- 游戏更新后模组失效
+  游戏更新可能改变 Harmony 补丁目标，需要重新适配。
+- 想恢复原版
+  按卸载步骤删除文件，然后在 Steam 里校验游戏文件。
+
+说明
+本包只包含加载器和自动维修模组，不包含游戏本体或游戏代码。
+这个模组会自动完成原本需要手动操作的维修动作，可能影响游戏平衡。
+BepInEx 及其附带的组件均使用 MIT 许可证，许可证文本在 LICENSES 文件夹。

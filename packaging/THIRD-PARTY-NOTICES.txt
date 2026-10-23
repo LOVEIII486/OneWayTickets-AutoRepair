@@ -1,0 +1,24 @@
+This package includes the following third-party components.
+
+BepInEx 5.4.23.5
+Copyright (c) 2018 Bepis
+License: MIT
+Source: https://github.com/BepInEx/BepInEx
+
+HarmonyX (0Harmony)
+Copyright (c) 2020 BepInEx
+License: MIT
+Source: https://github.com/BepInEx/HarmonyX
+
+MonoMod
+Copyright (c) 2015 - 2020 0x0ade
+License: MIT
+Source: https://github.com/MonoMod/MonoMod
+
+Mono.Cecil
+Copyright (c) 2008 - 2015 Jb Evain
+Copyright (c) 2008 - 2011 Novell, Inc.
+License: MIT
+Source: https://github.com/jbevain/cecil
+
+Full license texts are in the LICENSES folder.

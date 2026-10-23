@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- 结尾的反斜杠不要删。路径改成你的游戏安装目录。 -->
+    <GameRoot>C:\Program Files (x86)\Steam\steamapps\common\再再启程 One Way Tickets\</GameRoot>
+  </PropertyGroup>
+</Project>

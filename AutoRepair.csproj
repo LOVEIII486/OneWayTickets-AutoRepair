@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);MSB3277;CS1701;CS1702</NoWarn>
+    <AssemblyName>OWT.AutoRepair</AssemblyName>
+    <RootNamespace>OWT.AutoRepair</RootNamespace>
+    <Version>0.3.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
+  </PropertyGroup>
+
+  <Import Project="GameRoot.props" Condition="Exists('GameRoot.props')" />
+
+  <PropertyGroup>
+    <GameRoot Condition="'$(GameRoot)' == ''">$(OWT_GAME_ROOT)</GameRoot>
+    <GameRoot Condition="'$(GameRoot)' != ''">$([MSBuild]::EnsureTrailingSlash('$(GameRoot)'))</GameRoot>
+  </PropertyGroup>
+
+  <Target Name="CheckGameRoot" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(GameRoot)' == ''"
+           Text="GameRoot is not set. Copy GameRoot.props.example to GameRoot.props and set the game directory, pass -p:GameRoot=&quot;...&quot;, or set OWT_GAME_ROOT." />
+    <Error Condition="!Exists('$(GameRoot)再再启程_Data\Managed\World.dll')"
+           Text="World.dll not found under GameRoot: $(GameRoot)" />
+  </Target>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(GameRoot)BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameRoot)BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Commons">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\Commons.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Foundations">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\Foundations.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="World">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\World.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AutoCodes">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\AutoCodes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="Deploy" AfterTargets="Build" Condition="'$(DeployToGame)' != 'false' and '$(GameRoot)' != ''">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameRoot)BepInEx\plugins" />
+  </Target>
+
+</Project>
