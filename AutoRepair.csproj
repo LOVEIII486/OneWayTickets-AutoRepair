@@ -6,7 +6,7 @@
     <NoWarn>$(NoWarn);MSB3277;CS1701;CS1702</NoWarn>
     <AssemblyName>OWT.AutoRepair</AssemblyName>
     <RootNamespace>OWT.AutoRepair</RootNamespace>
-    <Version>0.3.0</Version>
+    <Version>0.3.5</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DeployToGame Condition="'$(DeployToGame)' == ''">true</DeployToGame>
   </PropertyGroup>
@@ -64,6 +64,10 @@
     </Reference>
     <Reference Include="UnityEngine.UIModule">
       <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameRoot)再再启程_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

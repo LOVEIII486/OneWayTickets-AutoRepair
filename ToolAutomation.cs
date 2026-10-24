@@ -1,8 +1,12 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Text;
 using Foundations;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 using World;
 using World.Adherents;
 using World.Characters;
@@ -37,7 +41,8 @@ namespace OWT.AutoRepair
         Hold,
         Click,
         Wrench,
-        Saw
+        Saw,
+        Direct
     }
 
     internal sealed class MaintenanceJob
@@ -60,15 +65,26 @@ namespace OWT.AutoRepair
         public bool Finishing;
         public bool AutoRotateForced;
         public bool AutoRotateOriginal;
+        public int LastProgressTick;
+        public int LastRemaining;
+        public int LastDiagTick;
+        public int LastRemovalSerial;
     }
 
     internal static class ToolAutomation
     {
         internal static bool OverrideMouse { get; private set; }
         internal static Vector2 MousePosition { get; private set; }
+        internal static string Status { get; private set; } = "Idle";
 
         private static readonly Dictionary<Device, float> RepairProgress = new Dictionary<Device, float>();
         private static readonly HashSet<MaintenanceKind> NoToolLogged = new HashSet<MaintenanceKind>();
+        private static readonly List<DeviceWaterView> PendingWaterViews = new List<DeviceWaterView>();
+        private static readonly List<DeviceAcidView> PendingAcidViews = new List<DeviceAcidView>();
+        private static readonly Dictionary<Device, int> LastTowelServiceTick = new Dictionary<Device, int>();
+        private static int DeferredViewRebuildDepth;
+        private static int WaterRemovalSerial;
+        private static int AcidRemovalSerial;
         private static MaintenanceJob _job;
         private static int _tick;
         private static int _cooldownUntil;
@@ -80,9 +96,108 @@ namespace OWT.AutoRepair
             _tick = 0;
             _cooldownUntil = 0;
             _damagedHealTimer = 0;
+            DeferredViewRebuildDepth = 0;
+            PendingWaterViews.Clear();
+            PendingAcidViews.Clear();
+            LastTowelServiceTick.Clear();
+            WaterRemovalSerial = 0;
+            AcidRemovalSerial = 0;
             RepairProgress.Clear();
             NoToolLogged.Clear();
+            Status = "Idle";
             LogOwnedTools();
+        }
+
+        internal static bool IsDeferringViewRebuild
+        {
+            get { return DeferredViewRebuildDepth > 0; }
+        }
+
+        internal static void BeginDeferredViewRebuild()
+        {
+            DeferredViewRebuildDepth++;
+        }
+
+        internal static void EndDeferredViewRebuild()
+        {
+            if (DeferredViewRebuildDepth > 0)
+            {
+                DeferredViewRebuildDepth--;
+            }
+
+            if (DeferredViewRebuildDepth > 0)
+            {
+                return;
+            }
+
+            FlushDeferredViews();
+        }
+
+        internal static void QueueWaterView(DeviceWaterView view)
+        {
+            if (view != null && !PendingWaterViews.Contains(view))
+            {
+                PendingWaterViews.Add(view);
+                WaterRemovalSerial++;
+            }
+        }
+
+        internal static void QueueAcidView(DeviceAcidView view)
+        {
+            if (view != null && !PendingAcidViews.Contains(view))
+            {
+                PendingAcidViews.Add(view);
+                AcidRemovalSerial++;
+            }
+        }
+
+        private static void FlushDeferredViews()
+        {
+            if (PendingWaterViews.Count == 0 && PendingAcidViews.Count == 0)
+            {
+                return;
+            }
+
+            DeviceWaterView[] waters = PendingWaterViews.ToArray();
+            DeviceAcidView[] acids = PendingAcidViews.ToArray();
+            PendingWaterViews.Clear();
+            PendingAcidViews.Clear();
+
+            AutoRepairPlugin.Diag("flush deferred reinit water=" + waters.Length + " acid=" + acids.Length);
+
+            foreach (DeviceWaterView view in waters)
+            {
+                if (view == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    view.reinit();
+                }
+                catch (Exception ex)
+                {
+                    LogWarning("Deferred water reinit failed: " + ex.Message);
+                }
+            }
+
+            foreach (DeviceAcidView view in acids)
+            {
+                if (view == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    view.reinit();
+                }
+                catch (Exception ex)
+                {
+                    LogWarning("Deferred acid reinit failed: " + ex.Message);
+                }
+            }
         }
 
         internal static void Tick(WorldContext context, DeviceMgr deviceMgr)
@@ -116,6 +231,8 @@ namespace OWT.AutoRepair
         {
             if (_job != null)
             {
+                AutoRepairPlugin.Diag("abort: " + reason);
+                DiagJob("abort", _job);
                 try
                 {
                     ReleaseTool(_job);
@@ -128,6 +245,7 @@ namespace OWT.AutoRepair
             }
 
             SetMouse(false, Vector2.zero);
+            Status = "Idle";
         }
 
         private static MaintenanceJob FindJob(DeviceMgr deviceMgr)
@@ -192,6 +310,9 @@ namespace OWT.AutoRepair
                 }
             }
 
+            List<Device> towelCandidates = new List<Device>();
+            Device stuporDevice = null;
+
             foreach (DeviceSlot slot in deviceMgr.slots_device)
             {
                 Device device = slot != null ? slot.slot_device : null;
@@ -218,11 +339,7 @@ namespace OWT.AutoRepair
                     DeviceAcid acid = (DeviceAcid)emergency;
                     if (acid.acids != null && acid.acids.Count > 0)
                     {
-                        MaintenanceJob job = TryCreateJob(MaintenanceKind.Acid, device, null, acid);
-                        if (job != null)
-                        {
-                            return job;
-                        }
+                        towelCandidates.Add(device);
                     }
                 }
                 else if (emergency is DeviceWet && AutoRepairPlugin.DryWet.Value)
@@ -230,24 +347,135 @@ namespace OWT.AutoRepair
                     DeviceWet wet = (DeviceWet)emergency;
                     if (wet.waterdrops != null && wet.waterdrops.Count > 0)
                     {
-                        MaintenanceJob job = TryCreateJob(MaintenanceKind.Water, device, null, wet);
-                        if (job != null)
-                        {
-                            return job;
-                        }
+                        towelCandidates.Add(device);
                     }
                 }
-                else if (emergency is DeviceStupor && AutoRepairPlugin.FixStupor.Value)
+                else if (emergency is DeviceStupor && AutoRepairPlugin.FixStupor.Value && stuporDevice == null)
                 {
-                    MaintenanceJob job = TryCreateJob(MaintenanceKind.Stupor, device, null, emergency);
+                    stuporDevice = device;
+                }
+            }
+
+            towelCandidates.Sort(CompareTowelCandidates);
+
+            foreach (Device device in towelCandidates)
+            {
+                DeviceEmergency emergency = device.device_emergency;
+                if (emergency is DeviceAcid)
+                {
+                    MaintenanceJob job = TryCreateJob(MaintenanceKind.Acid, device, null, emergency);
                     if (job != null)
                     {
+                        AutoRepairPlugin.Diag(TowelPickLog("Acid", device));
+                        return job;
+                    }
+                }
+                else if (emergency is DeviceWet)
+                {
+                    MaintenanceJob job = TryCreateJob(MaintenanceKind.Water, device, null, emergency);
+                    if (job != null)
+                    {
+                        AutoRepairPlugin.Diag(TowelPickLog("Water", device));
                         return job;
                     }
                 }
             }
 
+            if (stuporDevice != null)
+            {
+                MaintenanceJob job = TryCreateJob(MaintenanceKind.Stupor, stuporDevice, null, stuporDevice.device_emergency);
+                if (job != null)
+                {
+                    return job;
+                }
+            }
+
             return null;
+        }
+
+        private static int CompareTowelCandidates(Device a, Device b)
+        {
+            int lastA = GetLastTowelService(a);
+            int lastB = GetLastTowelService(b);
+            if (lastA != lastB)
+            {
+                return lastA.CompareTo(lastB);
+            }
+
+            return GetTowelRemaining(b).CompareTo(GetTowelRemaining(a));
+        }
+
+        private static int GetLastTowelService(Device device)
+        {
+            int tick;
+            return LastTowelServiceTick.TryGetValue(device, out tick) ? tick : 0;
+        }
+
+        private static int GetTowelRemaining(Device device)
+        {
+            if (device == null)
+            {
+                return 0;
+            }
+
+            DeviceAcid acid = device.device_emergency as DeviceAcid;
+            if (acid != null)
+            {
+                return acid.acids != null ? acid.acids.Count : 0;
+            }
+
+            DeviceWet wet = device.device_emergency as DeviceWet;
+            return wet != null && wet.waterdrops != null ? wet.waterdrops.Count : 0;
+        }
+
+        private static string TowelPickLog(string kind, Device device)
+        {
+            return "towel pick " + kind + " device=" + device.GetHashCode()
+                + " rem=" + GetTowelRemaining(device)
+                + " lastAge=" + ((_tick - GetLastTowelService(device)) / 120f).ToString("0.0") + "s";
+        }
+
+        private static bool ShouldYieldTowelJob(MaintenanceJob job, DeviceMgr deviceMgr)
+        {
+            if (job.Device == null || job.Tool == null)
+            {
+                return false;
+            }
+            if (job.Kind != MaintenanceKind.Water && job.Kind != MaintenanceKind.Acid)
+            {
+                return false;
+            }
+
+            int slice = AutoRepairPlugin.SecondsToTicks(AutoRepairPlugin.TowelSwapSeconds.Value);
+            if (_tick - job.StartTick < slice)
+            {
+                return false;
+            }
+
+            foreach (DeviceSlot slot in deviceMgr.slots_device)
+            {
+                Device device = slot != null ? slot.slot_device : null;
+                if (device == null || device == job.Device)
+                {
+                    continue;
+                }
+
+                DeviceWet wet = device.device_emergency as DeviceWet;
+                if (wet != null && AutoRepairPlugin.DryWet.Value
+                    && wet.waterdrops != null && wet.waterdrops.Count > 0)
+                {
+                    return true;
+                }
+
+                DeviceAcid acid = device.device_emergency as DeviceAcid;
+                if (acid != null && AutoRepairPlugin.CleanAcid.Value
+                    && acid.acids != null && acid.acids.Count > 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static MaintenanceJob TryCreateJob(
@@ -311,7 +539,7 @@ namespace OWT.AutoRepair
                 Character = character,
                 Emergency = emergency,
                 Tool = tool,
-                Action = GetAction(tool),
+                Action = GetAction(kind, tool),
                 TargetProvider = provider,
                 VisibleClick = visibleClick
             };
@@ -382,7 +610,7 @@ namespace OWT.AutoRepair
             }
         }
 
-        private static ToolActionKind GetAction(ToolView tool)
+        private static ToolActionKind GetAction(MaintenanceKind kind, ToolView tool)
         {
             if (tool == null || tool.logic == null)
             {
@@ -390,6 +618,27 @@ namespace OWT.AutoRepair
             }
 
             ToolLogic logic = tool.logic;
+
+            // Rag/BigRag use a per-drop GraphicRaycaster loop that can destroy
+            // other raycast targets mid-loop. Use direct removal with the tool
+            // held for visuals instead, so the game cannot freeze on overlapping
+            // water/acid drops. Mop/Drier have their own safe implementations.
+            if ((kind == MaintenanceKind.Water || kind == MaintenanceKind.Acid)
+                && (logic is Rag)
+                && !(logic is Mop)
+                && !(logic is Drier))
+            {
+                if (AutoRepairPlugin.TowelDirectMode.Value)
+                {
+                    return ToolActionKind.Direct;
+                }
+
+                // Old behavior: Rag clicked per drop, BigRag held for the
+                // game's own rubbing animation. Useful for reproducing the
+                // reported stuck-towel issue with diagnostics enabled.
+                return logic is BigRag ? ToolActionKind.Hold : ToolActionKind.Click;
+            }
+
             if (logic is FixWrench)
             {
                 return ToolActionKind.Wrench;
@@ -397,10 +646,6 @@ namespace OWT.AutoRepair
             if (logic is Saw && !(logic is ChainSaw) && !(logic is CircleSaw))
             {
                 return ToolActionKind.Saw;
-            }
-            if (logic is Rag && !(logic is BigRag))
-            {
-                return ToolActionKind.Click;
             }
             if (logic is Scissors || logic is InflatingHammer || logic is ScreamingChicken)
             {
@@ -470,7 +715,20 @@ namespace OWT.AutoRepair
         {
             _job = job;
             job.StartTick = _tick;
+            if ((job.Kind == MaintenanceKind.Water || job.Kind == MaintenanceKind.Acid)
+                && job.Device != null)
+            {
+                LastTowelServiceTick[job.Device] = _tick;
+            }
             job.NextActionTick = _tick + AutoRepairPlugin.SecondsToTicks(AutoRepairPlugin.ToolPickupDelaySeconds.Value);
+            Status = job.Kind + " / " + (job.Tool != null
+                ? job.Tool.logic.GetType().Name
+                : (job.VisibleClick ? "On-screen" : "Background"));
+            job.LastProgressTick = _tick;
+            job.LastRemaining = GetRemaining(job);
+            job.LastRemovalSerial = CurrentRemovalSerial(job.Kind);
+            job.LastDiagTick = _tick;
+            DiagJob("start", job);
 
             if (job.Tool != null)
             {
@@ -554,6 +812,11 @@ namespace OWT.AutoRepair
                 return;
             }
 
+            if (IsTowelJob(job))
+            {
+                CheckTowelDiagnostics(job);
+            }
+
             if (PlayerUsingTools(job.Tool))
             {
                 BeginFinish(false);
@@ -569,6 +832,15 @@ namespace OWT.AutoRepair
             if (JobResolved(job))
             {
                 BeginFinish(true);
+                return;
+            }
+
+            if (ShouldYieldTowelJob(job, deviceMgr))
+            {
+                AutoRepairPlugin.Diag("towel time-slice yield kind=" + job.Kind
+                    + " rem=" + GetTowelRemaining(job.Device)
+                    + " elapsed=" + ((_tick - job.StartTick) / 120f).ToString("0.00") + "s");
+                BeginFinish(false);
                 return;
             }
 
@@ -620,12 +892,16 @@ namespace OWT.AutoRepair
 
                 if (!toolView.IsPicking(job.Tool))
                 {
+                    AutoRepairPlugin.DiagWarn("tool lost from hand while job active");
+                    DiagJob("lost-pick", job);
                     BeginFinish(false);
                     return;
                 }
             }
             else if (job.Picked && !toolView.IsPicking(job.Tool))
             {
+                AutoRepairPlugin.DiagWarn("wrench lost from hand while job active");
+                DiagJob("lost-wrench-pick", job);
                 BeginFinish(false);
                 return;
             }
@@ -633,6 +909,8 @@ namespace OWT.AutoRepair
             Vector2? target = GetTargetScreen(job);
             if (target == null)
             {
+                AutoRepairPlugin.DiagWarn("target screen position is null");
+                DiagJob("target-null", job);
                 BeginFinish(false);
                 return;
             }
@@ -657,6 +935,25 @@ namespace OWT.AutoRepair
                     {
                         SendDown(job.Tool.logic, PointerEventData.InputButton.Left, toolPos);
                         job.Down = true;
+                        DiagJob("hold-down", job);
+                    }
+                    break;
+
+                case ToolActionKind.Direct:
+                    if (_tick >= job.NextActionTick)
+                    {
+                        int before = GetRemaining(job);
+                        DirectCleanStep(job);
+                        int after = GetRemaining(job);
+                        AutoRepairPlugin.Diag("direct-clean " + job.Kind + " " + before + " -> " + after);
+                        if (after < before)
+                        {
+                            job.LastProgressTick = _tick;
+                            job.LastRemaining = after;
+                        }
+                        DiagJob("direct-step", job);
+                        job.NextActionTick = _tick
+                            + AutoRepairPlugin.SecondsToTicks(AutoRepairPlugin.ClickIntervalSeconds.Value);
                     }
                     break;
 
@@ -689,18 +986,22 @@ namespace OWT.AutoRepair
         {
             if (job.Tool == null || job.Tool.logic == null)
             {
+                AutoRepairPlugin.DiagWarn("pickup failed: tool or logic is null");
                 return false;
             }
 
             SendClick(job.Tool.logic, PointerEventData.InputButton.Left, new Vector2(-10000f, -10000f));
             if (!toolView.IsPicking(job.Tool))
             {
+                AutoRepairPlugin.DiagWarn("pickup failed: IsPicking=false");
+                DiagJob("pickup-failed", job);
                 return false;
             }
 
             job.Picked = true;
             job.BoxOpen = false;
             job.NextActionTick = _tick + 1;
+            DiagJob("pickup-ok", job);
             return true;
         }
 
@@ -761,6 +1062,31 @@ namespace OWT.AutoRepair
             float interval = Mathf.Clamp(AutoRepairPlugin.ServiceIntervalSeconds.Value, 0.05f, 2f);
             RunBackgroundStep(job, interval);
             job.NextActionTick = _tick + AutoRepairPlugin.SecondsToTicks(interval);
+        }
+
+        private static void DirectCleanStep(MaintenanceJob job)
+        {
+            if (job.Device == null)
+            {
+                return;
+            }
+
+            if (job.Kind == MaintenanceKind.Water)
+            {
+                DeviceWet wet = job.Device.device_emergency as DeviceWet;
+                if (wet != null && wet.waterdrops.Count > 0)
+                {
+                    wet.RemoveWaterDrop(wet.waterdrops[wet.waterdrops.Count - 1]);
+                }
+            }
+            else if (job.Kind == MaintenanceKind.Acid)
+            {
+                DeviceAcid acid = job.Device.device_emergency as DeviceAcid;
+                if (acid != null && acid.acids.Count > 0)
+                {
+                    acid.RemoveAcid(acid.acids[acid.acids.Count - 1]);
+                }
+            }
         }
 
         private static void RunBackgroundStep(MaintenanceJob job, float interval)
@@ -953,6 +1279,9 @@ namespace OWT.AutoRepair
                 return;
             }
 
+            AutoRepairPlugin.Diag("begin-finish resolved=" + resolved + " kind=" + job.Kind);
+            DiagJob("begin-finish", job);
+
             if (job.Tool == null)
             {
                 FinishJobNow(resolved);
@@ -976,11 +1305,14 @@ namespace OWT.AutoRepair
             MaintenanceJob job = _job;
             if (job != null)
             {
+                DiagJob("finish-now", job);
                 ReleaseTool(job);
+                DiagJob("released", job);
                 _job = null;
             }
 
             SetMouse(false, Vector2.zero);
+            Status = "Idle";
             _cooldownUntil = _tick + AutoRepairPlugin.SecondsToTicks(AutoRepairPlugin.ToolCooldownSeconds.Value);
         }
 
@@ -1350,7 +1682,19 @@ namespace OWT.AutoRepair
                 return null;
             }
 
-            RectTransform rect = target.transform as RectTransform;
+            Graphic graphic = target as Graphic;
+            if (graphic == null)
+            {
+                graphic = target.GetComponent<Graphic>();
+            }
+            if (graphic != null && (!graphic.raycastTarget || !graphic.gameObject.activeInHierarchy))
+            {
+                graphic = null;
+            }
+
+            RectTransform rect = graphic != null
+                ? graphic.rectTransform
+                : target.transform as RectTransform;
             Vector3 world = rect != null
                 ? rect.TransformPoint(rect.rect.center)
                 : target.transform.position;
@@ -1462,6 +1806,257 @@ namespace OWT.AutoRepair
             {
                 handler.OnPointerUp(MakeEvent(button, position));
             }
+        }
+
+        private static bool IsTowelJob(MaintenanceJob job)
+        {
+            if (job == null || job.Tool == null || job.Tool.logic == null)
+            {
+                return false;
+            }
+
+            if (job.Kind != MaintenanceKind.Water && job.Kind != MaintenanceKind.Acid)
+            {
+                return false;
+            }
+
+            ToolLogic logic = job.Tool.logic;
+            return logic is Rag && !(logic is Mop) && !(logic is Drier);
+        }
+
+        private static int GetRemaining(MaintenanceJob job)
+        {
+            if (job == null)
+            {
+                return -1;
+            }
+
+            if (job.Kind == MaintenanceKind.Water && job.Device != null)
+            {
+                DeviceWet wet = job.Device.device_emergency as DeviceWet;
+                return wet != null ? wet.waterdrops.Count : 0;
+            }
+            if (job.Kind == MaintenanceKind.Acid && job.Device != null)
+            {
+                DeviceAcid acid = job.Device.device_emergency as DeviceAcid;
+                return acid != null ? acid.acids.Count : 0;
+            }
+            if (job.Kind == MaintenanceKind.Bind && job.Device != null)
+            {
+                DeviceBind bind = job.Device.device_emergency as DeviceBind;
+                return bind != null ? bind.vine_list.Count : 0;
+            }
+            if (job.Kind == MaintenanceKind.Repair)
+            {
+                return job.Device != null && job.Device.is_validate ? 0 : 1;
+            }
+            if (job.Kind == MaintenanceKind.Coma)
+            {
+                return job.Character != null && job.Character.state is Coma ? 1 : 0;
+            }
+            return 0;
+        }
+
+        private static int CurrentRemovalSerial(MaintenanceKind kind)
+        {
+            if (kind == MaintenanceKind.Water)
+            {
+                return WaterRemovalSerial;
+            }
+            if (kind == MaintenanceKind.Acid)
+            {
+                return AcidRemovalSerial;
+            }
+            return 0;
+        }
+
+        private static void CheckTowelDiagnostics(MaintenanceJob job)
+        {
+            if (!AutoRepairPlugin.Diagnostics.Value)
+            {
+                return;
+            }
+
+            if (job.Action == ToolActionKind.Direct)
+            {
+                return;
+            }
+
+            int remaining = GetRemaining(job);
+            if (remaining < job.LastRemaining)
+            {
+                job.LastRemaining = remaining;
+            }
+
+            int serial = CurrentRemovalSerial(job.Kind);
+            if (serial != job.LastRemovalSerial)
+            {
+                job.LastRemovalSerial = serial;
+                job.LastProgressTick = _tick;
+            }
+
+            if (_tick - job.LastDiagTick >= 60)
+            {
+                job.LastDiagTick = _tick;
+                DiagJob("tick", job);
+            }
+
+            int stallTicks = AutoRepairPlugin.SecondsToTicks(AutoRepairPlugin.TowelStallSeconds.Value);
+            if (_tick - job.LastProgressTick > stallTicks)
+            {
+                int before = GetRemaining(job);
+                AutoRepairPlugin.DiagWarn("towel no removal for "
+                    + ((_tick - job.LastProgressTick) / 120f).ToString("0.0") + "s");
+                DiagJob("stall", job);
+
+                DirectCleanStep(job);
+                int after = GetRemaining(job);
+                AutoRepairPlugin.Diag("stall-recovery " + job.Kind + " " + before + " -> " + after);
+
+                if (after < before)
+                {
+                    job.LastRemaining = after;
+                }
+                job.LastRemovalSerial = CurrentRemovalSerial(job.Kind);
+                job.LastProgressTick = _tick;
+            }
+        }
+
+        private static void DiagJob(string tag, MaintenanceJob job)
+        {
+            if (!AutoRepairPlugin.Diagnostics.Value)
+            {
+                return;
+            }
+
+            if (job == null)
+            {
+                AutoRepairPlugin.Diag(tag + " job=null");
+                return;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.Append(tag)
+                .Append(" kind=").Append(job.Kind)
+                .Append(" action=").Append(job.Action)
+                .Append(" rem=").Append(GetRemaining(job))
+                .Append(" picked=").Append(job.Picked)
+                .Append(" down=").Append(job.Down)
+                .Append(" clicked=").Append(job.Clicked)
+                .Append(" finishing=").Append(job.Finishing)
+                .Append(" elapsed=").Append(((_tick - job.StartTick) / 120f).ToString("0.00"))
+                .Append(" status=").Append(Status);
+
+            if (job.Tool != null)
+            {
+                ToolLogic logic = job.Tool.logic;
+                sb.Append(" tool=");
+                if (logic == null)
+                {
+                    sb.Append("null");
+                }
+                else
+                {
+                    sb.Append(logic.GetType().Name);
+                    if (job.Tool.tool_data != null)
+                    {
+                        sb.Append(" lvl=").Append(job.Tool.tool_data.level);
+                    }
+                    sb.Append(" logicPicked=").Append(FieldValue(logic, "is_picked"));
+                    sb.Append(" pressing=").Append(FieldValue(logic, "pressing"));
+                    sb.Append(" rubCd=").Append(FieldValue(logic, "rub_cd"));
+                    sb.Append(" clickTick=").Append(FieldValue(logic, "click_tick"));
+
+                    RectTransform rect = logic.transform as RectTransform;
+                    if (rect != null)
+                    {
+                        sb.Append(" pos=").Append(rect.anchoredPosition.x.ToString("0"))
+                            .Append(",").Append(rect.anchoredPosition.y.ToString("0"));
+                    }
+                }
+            }
+
+            PlayerToolMgrView toolView = GetToolView();
+            if (toolView != null)
+            {
+                if (job.Tool != null)
+                {
+                    sb.Append(" IsPicking=").Append(toolView.IsPicking(job.Tool));
+                }
+                sb.Append(" anchorsFree=").Append(CountField(toolView, "free_anchors"));
+                sb.Append(" anchorsUsed=").Append(CountField(toolView, "picking_map"));
+            }
+
+            sb.Append(" mouseOverride=").Append(OverrideMouse);
+            sb.Append(" mouse=").Append(MousePosition.x.ToString("0"))
+                .Append(",").Append(MousePosition.y.ToString("0"));
+
+            Component target = SafeGet(job.TargetProvider);
+            if (target == null)
+            {
+                sb.Append(" target=null");
+            }
+            else
+            {
+                sb.Append(" target=").Append(target.GetType().Name)
+                    .Append("#").Append(target.GetInstanceID());
+
+                Graphic graphic = target as Graphic;
+                if (graphic == null)
+                {
+                    graphic = target.GetComponent<Graphic>();
+                }
+                if (graphic != null)
+                {
+                    sb.Append(" graphic=").Append(graphic.GetType().Name)
+                        .Append(" raycast=").Append(graphic.raycastTarget);
+                }
+
+                Vector2? screen = ScreenPos(target);
+                if (screen.HasValue)
+                {
+                    sb.Append("@").Append(screen.Value.x.ToString("0"))
+                        .Append(",").Append(screen.Value.y.ToString("0"));
+                }
+            }
+
+            AutoRepairPlugin.Diag(sb.ToString());
+        }
+
+        private static object FieldValue(object instance, string name)
+        {
+            if (instance == null)
+            {
+                return null;
+            }
+
+            Type type = instance.GetType();
+            while (type != null)
+            {
+                FieldInfo field = type.GetField(
+                    name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    try
+                    {
+                        return field.GetValue(instance);
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                }
+                type = type.BaseType;
+            }
+
+            return null;
+        }
+
+        private static int CountField(object instance, string name)
+        {
+            ICollection collection = FieldValue(instance, name) as ICollection;
+            return collection != null ? collection.Count : -1;
         }
 
         private static void LogInfo(string message)

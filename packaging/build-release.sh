@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="0.3.0"
+VERSION="${VERSION:-0.3.5}"
 BEPINEX_VERSION="5.4.23.5"
 PKG_NAME="OneWayTickets_AutoRepair_v${VERSION}_BepInEx${BEPINEX_VERSION}_win64"
 

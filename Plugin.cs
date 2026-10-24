@@ -9,6 +9,8 @@ using HarmonyLib;
 using UnityEngine;
 using World;
 using World.Devices;
+using World.Devices.DeviceEmergencies.DeviceEmergenciesView;
+using World.Player_Tool.ToolsLogic.Rags;
 
 namespace OWT.AutoRepair
 {
@@ -17,7 +19,7 @@ namespace OWT.AutoRepair
     {
         public const string Guid = "owt.autorepair";
         public const string Name = "OWT Auto Repair";
-        public const string Version = "0.3.0";
+        public const string Version = "0.3.5";
 
         internal static ManualLogSource Log;
 
@@ -25,6 +27,9 @@ namespace OWT.AutoRepair
 
         private static Harmony _harmony;
         private static bool _errorLogged;
+        private static bool _toolExceptionLogged;
+        private static readonly int GuiWindowId = "OWT.AutoRepair.Gui".GetHashCode();
+        private Rect _windowRect = new Rect(20f, 170f, 300f, 150f);
 
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<string> Mode;
@@ -32,6 +37,11 @@ namespace OWT.AutoRepair
         internal static ConfigEntry<bool> WorkInSafeArea;
         internal static ConfigEntry<bool> RequireTools;
         internal static ConfigEntry<bool> LogRepairs;
+        internal static ConfigEntry<bool> Diagnostics;
+        internal static ConfigEntry<bool> TowelDirectMode;
+        internal static ConfigEntry<float> TowelStallSeconds;
+        internal static ConfigEntry<float> TowelSwapSeconds;
+        internal static ConfigEntry<bool> ShowOnScreenButton;
 
         internal static ConfigEntry<float> ToolPickupDelaySeconds;
         internal static ConfigEntry<float> ClickIntervalSeconds;
@@ -82,6 +92,7 @@ namespace OWT.AutoRepair
             Log.LogInfo(Name + " v" + Version + " loaded.");
             PatchWorldInit();
             PatchMousePosition();
+            PatchToolSafety();
         }
 
         private void BindConfig()
@@ -101,6 +112,18 @@ namespace OWT.AutoRepair
                 "为 true 时禁止后台回退，只使用工具箱里已有的真实工具；没有工具就不处理。");
             LogRepairs = Config.Bind("1. General", "LogRepairs", false,
                 "在日志里记录选中的工具、开始/结束的动作和回退处理。");
+            Diagnostics = Config.Bind("1. General", "Diagnostics", true,
+                "记录毛巾/水滴/酸液任务的详细诊断日志，用来定位卡住问题。");
+            TowelDirectMode = Config.Bind("1. General", "TowelDirectMode", false,
+                "毛巾处理水滴/酸液时使用直接清理模式（稳定但不显示擦拭动作）。默认 false，使用游戏原本的擦拭动画。");
+            TowelStallSeconds = Config.Bind("1. General", "TowelStallSeconds", 2f,
+                new ConfigDescription("毛巾连续多久没有任何实际移除事件才触发兜底清理（秒）。",
+                    new AcceptableValueRange<float>(0.5f, 10f)));
+            TowelSwapSeconds = Config.Bind("1. General", "TowelSwapSeconds", 1.2f,
+                new ConfigDescription("毛巾在另一台机器也有水滴/酸液时，最多连续擦多久就换一台（秒）。",
+                    new AcceptableValueRange<float>(0.5f, 5f)));
+            ShowOnScreenButton = Config.Bind("1. General", "ShowOnScreenButton", true,
+                "显示屏幕上的自动维修开关窗口，可以随时点击开关。");
 
             ToolPickupDelaySeconds = Config.Bind("1. Tool animation", "ToolPickupDelaySeconds", 0.05f,
                 new ConfigDescription("自动从工具箱取工具前的停顿（秒），让取工具动作看起来更自然。",
@@ -152,6 +175,229 @@ namespace OWT.AutoRepair
             WakePower = Config.Bind("4. Characters", "WakePowerPerAttempt", 3000,
                 new ConfigDescription("每次唤醒减少的昏迷时间。原版 hammer_lv_1_effect 默认为 3000。",
                     new AcceptableValueRange<int>(1, 100000)));
+        }
+
+        private void OnGUI()
+        {
+            if (!ShowOnScreenButton.Value)
+            {
+                return;
+            }
+
+            _windowRect = GUI.Window(GuiWindowId, _windowRect, DrawWindow, "OWT Auto Repair");
+        }
+
+        private void DrawWindow(int id)
+        {
+            GUILayout.Label("Status: " + ToolAutomation.Status);
+            GUILayout.Label("Mode: " + Mode.Value);
+
+            if (GUILayout.Button(Enabled.Value ? "Auto Repair: ON" : "Auto Repair: OFF"))
+            {
+                ToggleAutoRepair();
+            }
+
+            bool force = ForceAutoRotate.Value;
+            bool nextForce = GUILayout.Toggle(force, "Force Auto Wrench (auto_rotate)");
+            if (nextForce != force)
+            {
+                ForceAutoRotate.Value = nextForce;
+                Config.Save();
+                Log.LogInfo(Name + ": ForceAutoRotate " + (nextForce ? "enabled" : "disabled") + ".");
+            }
+
+            if (GUILayout.Button("Hide window"))
+            {
+                ShowOnScreenButton.Value = false;
+                Config.Save();
+            }
+
+            GUI.DragWindow();
+        }
+
+        private void ToggleAutoRepair()
+        {
+            Enabled.Value = !Enabled.Value;
+            Config.Save();
+            if (!Enabled.Value)
+            {
+                ToolAutomation.Abort("toggled off");
+            }
+            Log.LogInfo(Name + ": " + (Enabled.Value ? "enabled" : "disabled") + ".");
+        }
+
+        internal static void Diag(string message)
+        {
+            if (Diagnostics != null && Diagnostics.Value && Log != null)
+            {
+                Log.LogInfo("[AutoRepair:Diag] " + message);
+            }
+        }
+
+        internal static void DiagWarn(string message)
+        {
+            if (Diagnostics != null && Diagnostics.Value && Log != null)
+            {
+                Log.LogWarning("[AutoRepair:Diag] " + message);
+            }
+        }
+
+        private static void PatchToolSafety()
+        {
+            try
+            {
+                if (_harmony == null)
+                {
+                    _harmony = new Harmony(Guid);
+                }
+
+                MethodInfo finalizer = typeof(AutoRepairPlugin).GetMethod(
+                    nameof(ToolExceptionFinalizer),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                if (finalizer == null)
+                {
+                    return;
+                }
+
+                PatchFinalizer(typeof(BigRag), "tick", finalizer);
+                PatchFinalizer(typeof(Rag), "OnPointerClick", finalizer);
+
+                PatchTowelDeferral(typeof(BigRag), "tick");
+                PatchTowelDeferral(typeof(Rag), "OnPointerClick");
+                PatchViewReinitPrefix(typeof(DeviceWaterView), "reinit", nameof(DeferWaterReinit));
+                PatchViewReinitPrefix(typeof(DeviceAcidView), "reinit", nameof(DeferAcidReinit));
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning("Failed to install tool safety patches:\n" + ex);
+            }
+        }
+
+        private static void PatchTowelDeferral(Type type, string methodName)
+        {
+            MethodInfo method = AccessTools.Method(type, methodName);
+            if (method == null)
+            {
+                Log.LogWarning("Could not find " + type.Name + "." + methodName + " for deferral.");
+                return;
+            }
+
+            MethodInfo prefix = typeof(AutoRepairPlugin).GetMethod(
+                nameof(BeginTowelRaycast),
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo postfix = typeof(AutoRepairPlugin).GetMethod(
+                nameof(EndTowelRaycast),
+                BindingFlags.Static | BindingFlags.NonPublic);
+            if (prefix == null || postfix == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(prefix),
+                    postfix: new HarmonyMethod(postfix));
+                Log.LogInfo("Patched " + type.Name + "." + methodName + " deferred view rebuild.");
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning("Failed to patch " + type.Name + "." + methodName + " deferral:\n" + ex);
+            }
+        }
+
+        private static void PatchViewReinitPrefix(Type type, string methodName, string prefixName)
+        {
+            MethodInfo method = AccessTools.Method(type, methodName);
+            MethodInfo prefix = typeof(AutoRepairPlugin).GetMethod(
+                prefixName,
+                BindingFlags.Static | BindingFlags.NonPublic);
+            if (method == null || prefix == null)
+            {
+                Log.LogWarning("Could not find " + type.Name + "." + methodName + " for reinit deferral.");
+                return;
+            }
+
+            try
+            {
+                _harmony.Patch(method, prefix: new HarmonyMethod(prefix));
+                Log.LogInfo("Patched " + type.Name + "." + methodName + " reinit deferral.");
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning("Failed to patch " + type.Name + "." + methodName + " reinit:\n" + ex);
+            }
+        }
+
+        private static void BeginTowelRaycast()
+        {
+            ToolAutomation.BeginDeferredViewRebuild();
+        }
+
+        private static void EndTowelRaycast()
+        {
+            ToolAutomation.EndDeferredViewRebuild();
+        }
+
+        private static bool DeferWaterReinit(DeviceWaterView __instance)
+        {
+            if (!ToolAutomation.IsDeferringViewRebuild)
+            {
+                return true;
+            }
+
+            ToolAutomation.QueueWaterView(__instance);
+            return false;
+        }
+
+        private static bool DeferAcidReinit(DeviceAcidView __instance)
+        {
+            if (!ToolAutomation.IsDeferringViewRebuild)
+            {
+                return true;
+            }
+
+            ToolAutomation.QueueAcidView(__instance);
+            return false;
+        }
+
+        private static void PatchFinalizer(Type type, string methodName, MethodInfo finalizer)
+        {
+            MethodInfo method = AccessTools.Method(type, methodName);
+            if (method == null)
+            {
+                Log.LogWarning("Could not find " + type.Name + "." + methodName + " for safety patch.");
+                return;
+            }
+
+            try
+            {
+                _harmony.Patch(method, finalizer: new HarmonyMethod(finalizer));
+                Log.LogInfo("Patched " + type.Name + "." + methodName + " exception guard.");
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning("Failed to patch " + type.Name + "." + methodName + ":\n" + ex);
+            }
+        }
+
+        private static Exception ToolExceptionFinalizer(Exception __exception)
+        {
+            ToolAutomation.EndDeferredViewRebuild();
+
+            if (__exception != null
+                && (__exception is MissingReferenceException || __exception is NullReferenceException))
+            {
+                if (!_toolExceptionLogged)
+                {
+                    _toolExceptionLogged = true;
+                    Log.LogWarning("Suppressed a tool exception:\n" + __exception);
+                }
+                return null;
+            }
+
+            return __exception;
         }
 
         private static void PatchWorldInit()
